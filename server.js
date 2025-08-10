@@ -1,10 +1,11 @@
-// SCL-HUB USER API - The Complete Backend Server (with OAuth)
+// SCL-HUB USER API - The Final, Secure, OAuth-driven Server
 require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
-const { WebflowClient } = require('webflow-api'); // Import the official Webflow SDK
+const { WebflowClient } = require('webflow-api');
+const multer = require('multer');
+const stream = require('stream');
 
 const app = express();
 app.use(cors());
@@ -13,62 +14,157 @@ app.use(express.json());
 // --- CONFIGURATION ---
 const { WEBFLOW_CLIENT_ID, WEBFLOW_CLIENT_SECRET, COLLECTION_ID, SITE_ID } = process.env;
 
-// --- A simple in-memory store for the token (for this example) ---
+// --- A simple in-memory store for the token. In a production app, this would be a database. ---
 let webflowAccessToken = null;
 
-// --- API ENDPOINTS ---
+// --- AUTHENTICATION ENDPOINTS ---
 
-// 1. The Root Endpoint (for health checks)
-app.get('/', (req, res) => res.status(200).json({ status: "ok" }));
+// 1. The Root Endpoint - Redirects to the install flow for easy authorization
+app.get('/', (req, res) => {
+    const installUrl = WebflowClient.authorizeURL({
+        clientId: WEBFLOW_CLIENT_ID,
+        // Define the permissions our app needs
+        scope: "cms:read cms:write assets:write",
+    });
+    res.redirect(installUrl);
+});
 
-// 2. The OAuth Handshake Endpoint
-// This is where Webflow sends the user after they authorize the app.
+// 2. The OAuth Callback Endpoint - Where Webflow sends the user after they approve
 app.get('/auth/callback', async (req, res) => {
     try {
         const { code } = req.query;
         if (!code) return res.status(400).send("Authorization code is missing.");
 
-        // Exchange the temporary code for a permanent access token
         const token = await WebflowClient.getAccessToken({
             clientId: WEBFLOW_CLIENT_ID,
             clientSecret: WEBFLOW_CLIENT_SECRET,
             code: code,
         });
         
-        // Store the token securely on the server
         webflowAccessToken = token;
         console.log("SUCCESS: Webflow Access Token received and stored.");
-
-        // Send a success message to the user's browser
-        res.send("<h1>Authentication Successful!</h1><p>Your SCL-HUB application is now connected to your Webflow site. You can close this window.</p>");
-
+        res.send("<h1>Authentication Successful!</h1><p>Your SCL-HUB application is now connected. You can close this window.</p>");
     } catch (error) {
         console.error("OAuth Callback Error:", error);
         res.status(500).send("An error occurred during authentication.");
     }
 });
 
-// A helper function to get an authenticated API client
+// --- HELPER FUNCTION: Gets a secure, authenticated API client ---
 function getWebflowClient() {
     if (!webflowAccessToken) {
-        throw new Error("Webflow API is not authenticated. Please re-install the app.");
+        throw new Error("Webflow API is not authenticated. Please re-install the app from your Webflow dashboard.");
     }
     return new WebflowClient({ accessToken: webflowAccessToken });
 }
 
-// 3. All your other API endpoints now use the authenticated client
-app.post('/api/create-cluster', async (req, res) => {
+
+// --- MAIN API ENDPOINTS ---
+
+// 3. Endpoint to GET ALL clusters owned by a specific user
+app.get('/api/get-my-clusters', async (req, res) => {
     try {
         const webflow = getWebflowClient();
-        const { uid, fieldData } = req.body;
-        // ... (rest of your create logic using webflow.items.create...)
-        res.status(200).json({ success: true });
+        const { uid } = req.query;
+        if (!uid) return res.status(400).json({ error: "UID is required." });
+
+        const { items } = await webflow.items.list({ collectionId: COLLECTION_ID });
+        const userItems = items.filter(item => item.fieldData['firebase-uid'] === uid);
+        res.status(200).json(userItems);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
 });
 
-// ... (Update your other endpoints: /get-my-clusters, /update-cluster, etc. in the same way)
+// 4. Endpoint to GET ONE specific cluster for the edit page
+app.get('/api/get-single-cluster', async (req, res) => {
+    try {
+        const webflow = getWebflowClient();
+        const { itemId } = req.query;
+        if (!itemId) return res.status(400).json({ error: "Item ID is required." });
+
+        const item = await webflow.items.get({ collectionId: COLLECTION_ID, itemId: itemId });
+        res.status(200).json(item);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 5. Endpoint to CREATE a new cluster
+app.post('/api/create-cluster', async (req, res) => {
+    try {
+        const webflow = getWebflowClient();
+        const { uid, fieldData } = req.body;
+        if (!uid || !fieldData) return res.status(400).json({ error: "Missing data." });
+
+        fieldData['firebase-uid'] = uid;
+        if (!fieldData.name) return res.status(400).json({ error: "Name field is required." });
+        fieldData.slug = fieldData.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+
+        const newItem = await webflow.items.create({ collectionId: COLLECTION_ID, fieldData });
+        
+        await webflow.items.patch({
+            collectionId: COLLECTION_ID,
+            itemId: newItem.id,
+            fieldData: { 'webflow-item-id': newItem.id, '_archived': false, '_draft': false }
+        });
+
+        res.status(200).json(newItem);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 6. Endpoint to UPDATE an existing cluster
+app.patch('/api/update-cluster', async (req, res) => {
+    try {
+        const webflow = getWebflowClient();
+        const { itemId, fieldData } = req.body;
+        if (!itemId || !fieldData) return res.status(400).json({ error: "Missing data." });
+
+        const updatedItem = await webflow.items.patch({
+            collectionId: COLLECTION_ID,
+            itemId: itemId,
+            fieldData: fieldData
+        });
+        res.status(200).json(updatedItem);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 7. Endpoint to DELETE a cluster
+app.delete('/api/delete-cluster', async (req, res) => {
+    try {
+        const webflow = getWebflowClient();
+        const { itemId } = req.body;
+        if (!itemId) return res.status(400).json({ error: "Item ID is required." });
+
+        await webflow.items.remove({ collectionId: COLLECTION_ID, itemId: itemId });
+        res.status(200).json({ success: true, message: "Cluster deleted." });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 8. Endpoint to handle image uploads
+const upload = multer({ storage: multer.memoryStorage() });
+app.post('/api/upload-image', upload.single('file'), async (req, res) => {
+    try {
+        const webflow = getWebflowClient();
+        if (!req.file) return res.status(400).json({ error: "No file uploaded." });
+
+        const asset = await webflow.assets.upload({
+            siteId: SITE_ID,
+            fileName: req.file.originalname,
+            file: req.file.buffer
+        });
+
+        res.status(200).json({ url: asset.url });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 // --- START THE SERVER ---
 const port = process.env.PORT || 3004;
