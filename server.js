@@ -34,6 +34,30 @@ const upload = multer({ storage: multer.memoryStorage() });
 // 1. A simple root endpoint to confirm the server is running
 app.get('/', (req, res) => res.status(200).json({ status: "ok", message: "SCL-HUB User API is online." }));
 
+app.get('/api/get-schema', async (req, res) => {
+    try {
+        console.log("Request received for collection schema.");
+        
+        const response = await axios.get(WEBFLOW_COLLECTION_URL, {
+            headers: { 
+                'Authorization': `Bearer ${WEBFLOW_API_KEY}`,
+                'Accept': 'application/json'
+            }
+        });
+
+        // We only need the 'fields' part of the response.
+        const schema = response.data.fields;
+
+        console.log("Successfully fetched schema.");
+        // Send the clean schema object back to the browser.
+        res.status(200).json(schema);
+
+    } catch (error) {
+        console.error('Get Schema Error:', error.response?.data);
+        res.status(500).json({ error: "Failed to fetch the collection schema." });
+    }
+});
+
 // 2. Endpoint to handle image uploads directly to the Webflow Asset Manager
 app.post('/api/upload-image', upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: "No file was uploaded." });
