@@ -1,1 +1,5 @@
+# Ignore the file with our secret keys
 .env
+
+# Ignore the massive folder of downloaded libraries
+node_modules
