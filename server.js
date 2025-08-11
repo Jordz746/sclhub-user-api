@@ -24,9 +24,11 @@ const {
     KV_REST_API_TOKEN
 } = process.env;
 
+// --- DATABASE SETUP ---
+// The KV client will now receive the correct credentials.
 const kvClient = createClient({
-  url: UPSTASH_REDIS_REST_URL,
-  token: UPSTASH_REDIS_REST_TOKEN,
+  url: KV_URL,
+  token: KV_REST_API_TOKEN,
 });
 const TOKEN_KEY = 'webflow_access_token';
 
