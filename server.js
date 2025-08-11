@@ -1,188 +1,136 @@
+// SCL-HUB USER API - The Final, Definitive, SDK-Compliant Server
 require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
+const { WebflowClient } = require('webflow-api');
 const multer = require('multer');
 const stream = require('stream');
-const { WebflowClient } = require('webflow-api');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- ENV CONFIG ---
-const {
-    WEBFLOW_CLIENT_ID,
-    WEBFLOW_CLIENT_SECRET,
-    COLLECTION_ID,
-    SITE_ID,
-    REDIRECT_URI // Must match exactly in Webflow App settings
-} = process.env;
+// --- CONFIGURATION ---
+const { WEBFLOW_CLIENT_ID, WEBFLOW_CLIENT_SECRET, COLLECTION_ID, SITE_ID } = process.env;
 
-// --- TOKEN STORAGE ---
-let webflowAccessToken = process.env.WEBFLOW_ACCESS_TOKEN || null;
+let webflowAccessToken = null;
 
-// --- WEBFLOW CLIENT HELPER ---
-function getWebflowClient() {
-    if (!webflowAccessToken) throw new Error("Webflow API not authenticated.");
-    return new WebflowClient({ accessToken: webflowAccessToken });
-}
+// --- AUTHENTICATION & SETUP ---
 
-// --- OAUTH FLOW ---
 app.get('/', (req, res) => {
     const installUrl = WebflowClient.authorizeURL({
         clientId: WEBFLOW_CLIENT_ID,
-        redirectUri: REDIRECT_URI,
-        scope: 'cms:read cms:write assets:write'
+        scope: "cms:read cms:write assets:write",
     });
     res.redirect(installUrl);
 });
 
 app.get('/auth/callback', async (req, res) => {
-    const { code } = req.query;
-
-    if (!code) {
-        return res.status(400).send("Authorization code missing.");
-    }
-
-    if (webflowAccessToken) {
-        return res.send("<h1>Already authenticated</h1><p>Your Webflow app is connected. You can close this window.</p>");
-    }
-
     try {
-        const tokenData = await WebflowClient.getAccessToken({
+        const { code } = req.query;
+        if (!code) return res.status(400).send("Authorization code is missing.");
+        const token = await WebflowClient.getAccessToken({
             clientId: WEBFLOW_CLIENT_ID,
             clientSecret: WEBFLOW_CLIENT_SECRET,
-            code,
-            redirectUri: REDIRECT_URI
+            code: code,
         });
-
-        webflowAccessToken = tokenData.access_token;
-
-        // TODO: Persist token to DB or file
-        console.log("✅ Webflow Access Token stored");
-
-        res.send("<h1>Authentication successful!</h1><p>You can now close this window.</p>");
+        webflowAccessToken = token;
+        console.log("SUCCESS: Webflow Access Token received.");
+        res.send("<h1>Authentication Successful!</h1><p>Your application is connected. You can close this window.</p>");
     } catch (error) {
-        console.error("OAuth Callback Error:", error.body || error.message);
-        res.status(500).send("OAuth authentication failed.");
+        console.error("OAuth Callback Error:", error);
+        res.status(500).send("An error occurred during authentication.");
     }
 });
 
-// --- MULTER UPLOAD CONFIG ---
-const upload = multer({ storage: multer.memoryStorage() });
+function getWebflowClient() {
+    if (!webflowAccessToken) {
+        throw new Error("Webflow API is not authenticated. Please re-authorize the app from your Webflow dashboard.");
+    }
+    return new WebflowClient({ accessToken: webflowAccessToken });
+}
 
-// --- API ROUTES ---
+// --- MAIN API ENDPOINTS ---
 
-// GET all clusters for a user
 app.get('/api/get-my-clusters', async (req, res) => {
     try {
+        const webflow = getWebflowClient();
         const { uid } = req.query;
         if (!uid) return res.status(400).json({ error: "UID is required." });
-
-        const webflow = getWebflowClient();
-        const resp = await webflow.items.list({ collectionId: COLLECTION_ID });
-
-        const userItems = resp.items.filter(item => item.fieldData['firebase-uid'] === uid);
-        res.json(userItems);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const { items } = await webflow.items.listItems({ collectionId: COLLECTION_ID });
+        const userItems = items.filter(item => item.fieldData['firebase-uid'] === uid);
+        res.status(200).json(userItems);
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// GET single cluster
 app.get('/api/get-single-cluster', async (req, res) => {
     try {
+        const webflow = getWebflowClient();
         const { itemId } = req.query;
         if (!itemId) return res.status(400).json({ error: "Item ID is required." });
-
-        const webflow = getWebflowClient();
-        const item = await webflow.items.get({ collectionId: COLLECTION_ID, itemId });
-        res.json(item);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const item = await webflow.items.getItem({ collectionId: COLLECTION_ID, itemId: itemId });
+        res.status(200).json(item);
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// CREATE a new cluster
 app.post('/api/create-cluster', async (req, res) => {
     try {
-        const { uid, fieldData } = req.body;
-        if (!uid || !fieldData || !fieldData.name) {
-            return res.status(400).json({ error: "Missing required data." });
-        }
-
         const webflow = getWebflowClient();
+        const { uid, fieldData } = req.body;
+        if (!uid || !fieldData) return res.status(400).json({ error: "Missing data." });
         fieldData['firebase-uid'] = uid;
-        fieldData.slug = fieldData.name.toLowerCase()
-            .replace(/\s+/g, '-')
-            .replace(/[^a-z0-9-]/g, '');
-
-        const newItem = await webflow.items.createItem({
+        if (!fieldData.name) return res.status(400).json({ error: "Name field is required." });
+        fieldData.slug = fieldData.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+        
+        const newItem = await webflow.items.createItem({ collectionId: COLLECTION_ID, fieldData });
+        
+        await webflow.items.patchItem({
             collectionId: COLLECTION_ID,
-            fields: fieldData
+            itemId: newItem.id,
+            fieldData: { 'webflow-item-id': newItem.id, '_archived': false, '_draft': false }
         });
-
-        res.status(201).json(newItem);
-    } catch (err) {
-        console.error("Create Cluster Error:", err.body || err.message);
-        res.status(500).json({ error: err.message });
+        res.status(200).json(newItem);
+    } catch (error) {
+        console.error("Create Cluster Error:", error.response?.data || error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// UPDATE an existing cluster
 app.patch('/api/update-cluster', async (req, res) => {
     try {
-        const { itemId, fieldData } = req.body;
-        if (!itemId || !fieldData) return res.status(400).json({ error: "Missing required data." });
-
         const webflow = getWebflowClient();
-        const updatedItem = await webflow.items.patchItem({
-            collectionId: COLLECTION_ID,
-            itemId,
-            fields: fieldData
-        });
-
-        res.json(updatedItem);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        const { itemId, fieldData } = req.body;
+        if (!itemId || !fieldData) return res.status(400).json({ error: "Missing data." });
+        const updatedItem = await webflow.items.patchItem({ collectionId: COLLECTION_ID, itemId: itemId, fieldData: fieldData });
+        res.status(200).json(updatedItem);
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// DELETE a cluster
 app.delete('/api/delete-cluster', async (req, res) => {
     try {
+        const webflow = getWebflowClient();
         const { itemId } = req.body;
         if (!itemId) return res.status(400).json({ error: "Item ID is required." });
-
-        const webflow = getWebflowClient();
-        await webflow.items.removeItem({ collectionId: COLLECTION_ID, itemId });
-
-        res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        await webflow.items.removeItem({ collectionId: COLLECTION_ID, itemId: itemId });
+        res.status(200).json({ success: true });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// UPLOAD image asset
+const upload = multer({ storage: multer.memoryStorage() });
 app.post('/api/upload-image', upload.single('file'), async (req, res) => {
     try {
-        if (!req.file) return res.status(400).json({ error: "No file uploaded." });
-
         const webflow = getWebflowClient();
-        const readStream = stream.Readable.from(req.file.buffer);
-
+        if (!req.file) return res.status(400).json({ error: "No file uploaded." });
         const asset = await webflow.assets.uploadAsset({
             siteId: SITE_ID,
             fileName: req.file.originalname,
-            file: readStream
+            file: req.file.buffer
         });
-
-        res.json({ url: asset.url });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.status(200).json({ url: asset.url });
+    } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// --- START SERVER ---
+// --- START THE SERVER ---
 const port = process.env.PORT || 3004;
-app.listen(port, () => console.log(`SCL-HUB User API running on port ${port}`));
+app.listen(port, () => console.log(`SCL-HUB User API is running on port ${port}`));
