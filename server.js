@@ -163,3 +163,5 @@ app.post('/api/upload-image', upload.single('file'), async (req, res) => {
 // --- START THE SERVER ---
 const port = process.env.PORT || 3004;
 app.listen(port, () => console.log(`SCL-HUB User API is running on port ${port}`));
+
+// --- START THE SERVER ---
