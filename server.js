@@ -26,8 +26,8 @@ const {
 
 // --- DATABASE SETUP ---
 const kvClient = createClient({
-  url: KV_URL,
-  token: KV_REST_API_TOKEN,
+  url: KV_REDIS_URL,
+  token: KV_REDIS_REST_API_TOKEN,
 });
 const TOKEN_KEY = 'webflow_access_token'; // The key for storing our token in the database
 
