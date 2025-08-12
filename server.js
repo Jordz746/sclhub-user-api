@@ -25,7 +25,7 @@ const {
     VERCEL_URL
 } = process.env;
 
-const REDIRECT_URI = `https://${VERCEL_URL}/auth/callback`;
+const REDIRECT_URI = `https://${sclhub-user-api.vercel.app}/auth/callback`;
 
 // --- DATABASE SETUP ---
 const kvClient = createClient({
