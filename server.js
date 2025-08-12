@@ -71,7 +71,8 @@ app.get('/', (req, res) => {
     const installUrl = WebflowClient.authorizeURL({
         clientId: WEBFLOW_CLIENT_ID,
         scope: "cms:read cms:write assets:write",
-        redirectUri: REDIRECT_URI
+        redirect_uri: process.env.WEBFLOW_REDIRECT_URI
+
     });
     res.redirect(installUrl);
 });
@@ -86,7 +87,8 @@ app.get('/auth/callback', async (req, res) => {
             clientId: WEBFLOW_CLIENT_ID,
             clientSecret: WEBFLOW_CLIENT_SECRET,
             code,
-            redirectUri: REDIRECT_URI
+            redirect_uri: process.env.WEBFLOW_REDIRECT_URI
+
         });
 
         // Store tokens persistently
