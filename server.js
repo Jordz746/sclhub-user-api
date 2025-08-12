@@ -1,128 +1,117 @@
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import fetch from 'node-fetch';
-import { kv } from '@vercel/kv';
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { WebflowClient } = require('webflow-api');
+const { kv } = require('@vercel/kv');
+
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- ENV ---
 const {
   WEBFLOW_CLIENT_ID,
   WEBFLOW_CLIENT_SECRET,
-  WEBFLOW_REDIRECT_URI, // e.g. "https://yourapp.vercel.app/oauth/callback"
-  COLLECTION_ID,
-  SITE_ID
+  REDIRECT_URI,
+  COLLECTION_ID
 } = process.env;
 
-if (!WEBFLOW_CLIENT_ID || !WEBFLOW_CLIENT_SECRET || !WEBFLOW_REDIRECT_URI) {
-  console.error('❌ Missing required environment variables.');
-  process.exit(1);
+let client = null;
+
+// --- Load token from KV ---
+async function getWebflowClient() {
+  if (!client) {
+    const accessToken = await kv.get('webflow_access_token');
+    if (!accessToken) throw new Error('Webflow API not authenticated.');
+    client = new WebflowClient({ accessToken });
+  }
+  return client;
 }
 
-const WEBFLOW_AUTH_URL = 'https://webflow.com/oauth/authorize';
-const WEBFLOW_TOKEN_URL = 'https://api.webflow.com/oauth/access_token';
-const WEBFLOW_API_BASE = 'https://api.webflow.com';
+// --- Refresh token if expired ---
+async function refreshToken() {
+  const refreshToken = await kv.get('webflow_refresh_token');
+  if (!refreshToken) throw new Error('No refresh token found.');
 
-// Step 1: Redirect to Webflow OAuth
-app.get('/auth', (req, res) => {
-  const authUrl = `${WEBFLOW_AUTH_URL}?client_id=${WEBFLOW_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(WEBFLOW_REDIRECT_URI)}`;
-  res.redirect(authUrl);
-});
+  const res = await fetch('https://api.webflow.com/oauth/access_token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      client_id: WEBFLOW_CLIENT_ID,
+      client_secret: WEBFLOW_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken
+    })
+  });
 
-// Step 2: OAuth Callback
-app.get('/oauth/callback', async (req, res) => {
+  const data = await res.json();
+  if (data.access_token) {
+    await kv.set('webflow_access_token', data.access_token);
+    if (data.refresh_token) await kv.set('webflow_refresh_token', data.refresh_token);
+    client = new WebflowClient({ accessToken: data.access_token });
+  } else {
+    console.error('Failed to refresh token:', data);
+  }
+}
+
+// --- OAuth callback ---
+app.get('/callback', async (req, res) => {
   const { code } = req.query;
   if (!code) return res.status(400).send('Missing code');
 
   try {
-    const tokenRes = await fetch(WEBFLOW_TOKEN_URL, {
+    const response = await fetch('https://api.webflow.com/oauth/access_token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: WEBFLOW_CLIENT_ID,
         client_secret: WEBFLOW_CLIENT_SECRET,
         grant_type: 'authorization_code',
-        redirect_uri: WEBFLOW_REDIRECT_URI,
+        redirect_uri: REDIRECT_URI,
         code
       })
     });
 
-    const tokenData = await tokenRes.json();
-    if (tokenData.error) {
-      console.error('OAuth Error:', tokenData);
-      return res.status(400).send(tokenData);
+    const data = await response.json();
+    if (data.access_token) {
+      await kv.set('webflow_access_token', data.access_token);
+      await kv.set('webflow_refresh_token', data.refresh_token);
+      client = new WebflowClient({ accessToken: data.access_token });
+      res.send('✅ Webflow Authenticated!');
+    } else {
+      console.error(data);
+      res.status(500).send('OAuth failed.');
     }
-
-    // Save tokens in KV
-    await kv.set('webflow_tokens', tokenData);
-    res.send('✅ Webflow authenticated and tokens saved in KV.');
   } catch (err) {
     console.error('OAuth Callback Error:', err);
-    res.status(500).send('OAuth callback failed.');
+    res.status(500).send('OAuth failed.');
   }
 });
 
-// Helper: Get valid token (refresh if expired)
-async function getValidToken() {
-  const tokens = await kv.get('webflow_tokens');
-  if (!tokens) throw new Error('No tokens stored. Please authenticate.');
-
-  const now = Math.floor(Date.now() / 1000);
-  if (tokens.expires_at && now > tokens.expires_at - 60) {
-    console.log('🔄 Refreshing expired token...');
-    const refreshRes = await fetch(WEBFLOW_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        client_id: WEBFLOW_CLIENT_ID,
-        client_secret: WEBFLOW_CLIENT_SECRET,
-        grant_type: 'refresh_token',
-        refresh_token: tokens.refresh_token
-      })
-    });
-
-    const newTokens = await refreshRes.json();
-    if (newTokens.error) throw new Error('Token refresh failed');
-
-    newTokens.expires_at = now + newTokens.expires_in;
-    await kv.set('webflow_tokens', newTokens);
-    return newTokens.access_token;
-  }
-
-  return tokens.access_token;
-}
-
-// Example API call
+// --- Example create CMS item ---
 app.post('/create-item', async (req, res) => {
   try {
-    const accessToken = await getValidToken();
-    const response = await fetch(`${WEBFLOW_API_BASE}/collections/${COLLECTION_ID}/items`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'accept-version': '1.0.0',
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        fields: {
-          name: 'Test Item',
-          slug: `test-item-${Date.now()}`,
-          _archived: false,
-          _draft: false
-        }
-      })
+    let wf = await getWebflowClient();
+    const response = await wf.items.create({
+      collectionId: COLLECTION_ID,
+      fields: req.body
     });
-
-    const data = await response.json();
-    res.json(data);
+    res.json(response);
   } catch (err) {
-    console.error('Create Item Error:', err);
-    res.status(500).send('Failed to create item.');
+    if (err.message.includes('401')) {
+      await refreshToken();
+      let wf = await getWebflowClient();
+      const response = await wf.items.create({
+        collectionId: COLLECTION_ID,
+        fields: req.body
+      });
+      res.json(response);
+    } else {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
-app.listen(3000, () => {
-  console.log('✅ Server running on port 3000');
-});
+app.listen(3000, () => console.log('Server running...'));
